@@ -3,6 +3,7 @@ from flask_cors import CORS
 from flask_jwt_extended import JWTManager
 from flask_socketio import SocketIO, emit, join_room, leave_room
 from datetime import datetime, timezone
+import os
 import json
 
 from config import Config
@@ -14,27 +15,28 @@ def create_app():
     app = Flask(__name__)
 
     app.config.from_object(Config)
-    
-        # Configure CORS to allow all localhost origins and mobile device access
-    CORS(app, origins=[
-         "http://localhost:3000", "http://localhost:5000", "http://localhost:5173", "http://localhost:5174", 
-         "http://localhost:5175", "http://localhost:5176", "http://localhost:5177", "http://localhost:5178", 
-         "http://localhost:5179",
-         "http://10.0.2.2:5000",      # Android Emulator
-         "http://10.0.0.177:5000",    # Your computer's WiFi IP for physical device
-         "http://192.168.1.177:5000", # Alternative IP format
-         ], 
-         supports_credentials=True,
-         allow_headers=["Content-Type", "Authorization", "Accept"],
-         methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
+
+    # Configure CORS (allow configured origins or all)
+    allowed = Config.ALLOWED_ORIGINS
+    cors_kwargs = {
+        'supports_credentials': True,
+        'allow_headers': ["Content-Type", "Authorization", "Accept"],
+        'methods': ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    }
+    if allowed == '*':
+        CORS(app, resources={r"*": {"origins": "*"}}, **cors_kwargs)
+    else:
+        origins = [o.strip() for o in allowed.split(',') if o.strip()]
+        CORS(app, origins=origins, **cors_kwargs)
     
     db.init_app(app)
 
     # Initialize Flask-JWT-Extended
     jwt = JWTManager(app)
 
-    # Initialize SockerIO
-    socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
+    # Initialize SocketIO (set SOCKETIO_ASYNC_MODE=eventlet in production)
+    async_mode = os.environ.get('SOCKETIO_ASYNC_MODE', 'threading')
+    socketio = SocketIO(app, cors_allowed_origins="*", async_mode=async_mode)
     
     with app.app_context():
         from models import User, Post, PostImage, ChatRoom, Message, Notification
@@ -227,4 +229,5 @@ def create_app():
 app, socketio = create_app()
 
 if __name__ == '__main__':
+    # Dev server only. In production, run with: gunicorn -k eventlet -w 1 -b 0.0.0.0:5000 app:app
     socketio.run(app, debug=True, host='0.0.0.0', allow_unsafe_werkzeug=True, port=5000)
