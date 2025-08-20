@@ -1,0 +1,41 @@
+# ---- Python ----
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.so
+
+# Virtual environments
+venv/
+.env/
+.venv/
+
+# Environment files
+.env
+*.env
+
+# Logs
+*.log
+
+# Byte-compiled
+*.egg-info/
+dist/
+build/
+
+# ---- Flask / Config ----
+instance/
+*.db
+*.sqlite3
+
+# ---- OS files ----
+.DS_Store
+Thumbs.db
+
+# ---- AWS / EC2 ----
+# Don't commit private key files!
+*.pem
+
+# AWS CLI cache/config
+.aws/
+
+
