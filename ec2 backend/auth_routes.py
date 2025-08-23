@@ -5,6 +5,7 @@ from sqlalchemy.sql.functions import current_user
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 from models import db, User, Post, PostImage, SavedPost, Notification, Message, ChatRoom, PendingUser, PendingEmailChange, PostLike, PostReport
+from config import Config
 from datetime import datetime, timedelta, timezone
 import os
 import uuid
@@ -83,81 +84,68 @@ def login():
 
 @auth_bp.route('/google-login', methods=['POST'])
 def google_login():
-    print("🔐 Backend - Google login endpoint called")
-    print("🔐 Backend - Request method:", request.method)
-    print("🔐 Backend - Request headers:", dict(request.headers))
-    
     data = request.json
-    print("🔐 Backend - Request data:", data)
-    
-    google_user_data = data.get('user')  # This will contain the user data from frontend
-    id_token = data.get('id_token')  # Google ID token for verification
+    id_token_str = data.get('id_token')
 
-    print("🔐 Backend - Google user data:", google_user_data)
-    print("🔐 Backend - Has ID token:", bool(id_token))
+    if not id_token_str:
+        return jsonify({'error': 'Google ID token is required'}), 400
 
-    if not google_user_data:
-        print("❌ Backend - No Google user data provided")
-        return jsonify({'error': 'Google user data is required'}), 400
-    
     try:
-        google_id = google_user_data.get('id')
-        email = google_user_data.get('email')
-        name = google_user_data.get('name', f'user_{google_id}')
-        picture = google_user_data.get('picture')
+        from google.oauth2 import id_token as google_id_token
+        from google.auth.transport import requests as google_requests
 
-        print("🔐 Backend - Extracted data:", {
-            'google_id': google_id,
-            'email': email,
-            'name': name,
-            'has_picture': bool(picture)
-        })
+        verified = google_id_token.verify_oauth2_token(
+            id_token_str,
+            google_requests.Request(),
+            Config.GOOGLE_CLIENT_ID
+        )
 
-        if not email:
-            print("❌ Backend - No email provided")
+        if verified.get('iss') not in ['accounts.google.com', 'https://accounts.google.com']:
+            return jsonify({'error': 'Invalid token issuer'}), 401
+
+        if not verified.get('email'):
             return jsonify({'error': 'Email is required from Google'}), 400
 
-        if id_token:
-            print("🔐 Backend - ID token received, would verify with Google here")
-            # You can add Google token verification here later
+        if not verified.get('email_verified', False):
+            return jsonify({'error': 'Google email not verified'}), 400
 
-        # Check if user exists by email or google_id
+        google_id = verified['sub']
+        email = verified['email']
+        name = verified.get('name', f'user_{google_id}')
+        picture = verified.get('picture')
+
         user = User.query.filter(
             (User.email == email) | (User.google_id == google_id)
         ).first()
 
-        print("🔐 Backend - User lookup result:", "Found" if user else "Not found")
-
         if not user:
-            # Create new user
-            print("🔐 Backend - Creating new user")
             user = User(
                 username=name,
                 email=email,
                 google_id=google_id,
                 profile_picture=picture,
                 auth_provider='google',
-                password=None  # No password for Google users
+                password=None,
+                is_email_verified=True
             )
             db.session.add(user)
             db.session.commit()
-            print("🔐 Backend - New user created with ID:", user.id)
         else:
-            # Update existing user's Google info if they logged in with Google before
-            print("🔐 Backend - Updating existing user")
+            updated = False
             if not user.google_id:
                 user.google_id = google_id
                 user.auth_provider = 'google'
+                user.is_email_verified = True
+                updated = True
             if picture and not user.profile_picture:
                 user.profile_picture = picture
-            db.session.commit()
-            print("🔐 Backend - User updated")
+                updated = True
+            if updated:
+                db.session.commit()
 
-        # Create JWT access token
         access_token = create_access_token(identity=str(user.id))
-        print("🔐 Backend - JWT token created for user ID:", user.id)
 
-        response_data = {
+        return jsonify({
             'message': 'Google login successful',
             'token': access_token,
             'user_id': user.id,
@@ -165,20 +153,12 @@ def google_login():
             'username': user.username,
             'profile_picture': user.profile_picture,
             'auth_provider': user.auth_provider
-        }
-        
-        print("🔐 Backend - Sending success response:", response_data)
-        return jsonify(response_data), 200
-
-    except Exception as e:
-        print(f"❌ Backend - Google login error: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        return jsonify({'error': 'Google login failed'}), 500
+        }), 200
 
     except ValueError as e:
-        print(f"❌ Backend - ValueError: {str(e)}")
-        return jsonify({'error': f'Invalid token: {str(e)}'}), 400
+        return jsonify({'error': f'Invalid Google token: {str(e)}'}), 401
+    except Exception as e:
+        return jsonify({'error': f'Google login failed: {str(e)}'}), 500
 
 
 @auth_bp.route('/refresh-token', methods=['POST'])

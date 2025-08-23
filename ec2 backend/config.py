@@ -12,7 +12,8 @@ class Config:
     SQLALCHEMY_DATABASE_URI = os.environ.get('DATABASE_URL') or 'sqlite:///' + os.path.join(basedir, 'agenagn.db')
     SQLALCHEMY_TRACK_MODIFICATIONS = False
 
-    JWT_SECRET_KEY = os.environ.get('JWT_SECRET') or 'your-secret-key-change-this-in-production'
+    # Use correct env var name for JWT secret
+    JWT_SECRET_KEY = os.environ.get('JWT_SECRET_KEY') or 'your-secret-key-change-this-in-production'
     JWT_ACCESS_TOKEN_EXPIRES = 86400  # 24 hours (1 day)
 
     # CORS / Allowed Origins

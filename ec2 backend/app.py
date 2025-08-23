@@ -36,7 +36,13 @@ def create_app():
 
     # Initialize SocketIO (set SOCKETIO_ASYNC_MODE=eventlet in production)
     async_mode = os.environ.get('SOCKETIO_ASYNC_MODE', 'threading')
-    socketio = SocketIO(app, cors_allowed_origins="*", async_mode=async_mode)
+    # In production, restrict CORS to allowed origins; dev can remain *
+    allowed = Config.ALLOWED_ORIGINS
+    if os.environ.get('FLASK_ENV') == 'production' and allowed != '*':
+        origins = [o.strip() for o in allowed.split(',') if o.strip()]
+        socketio = SocketIO(app, cors_allowed_origins=origins, async_mode=async_mode)
+    else:
+        socketio = SocketIO(app, cors_allowed_origins="*", async_mode=async_mode)
     
     with app.app_context():
         from models import User, Post, PostImage, ChatRoom, Message, Notification
@@ -230,4 +236,8 @@ app, socketio = create_app()
 
 if __name__ == '__main__':
     # Dev server only. In production, run with: gunicorn -k eventlet -w 1 -b 0.0.0.0:5000 app:app
+    is_prod = os.environ.get('FLASK_ENV') == 'production'
+    if is_prod:
+        # Prevent accidental debug server in production
+        raise SystemExit('Run in production using: gunicorn -k eventlet -w 1 -b 0.0.0.0:5000 app:app')
     socketio.run(app, debug=True, host='0.0.0.0', allow_unsafe_werkzeug=True, port=5000)
