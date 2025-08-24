@@ -5,7 +5,6 @@ from sqlalchemy.sql.functions import current_user
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 from models import db, User, Post, PostImage, SavedPost, Notification, Message, ChatRoom, PendingUser, PendingEmailChange, PostLike, PostReport
-from config import Config
 from datetime import datetime, timedelta, timezone
 import os
 import uuid
@@ -13,6 +12,11 @@ from flask_jwt_extended import (jwt_required, get_jwt_identity, JWTManager,
                                 create_access_token, create_refresh_token)
 from s3_utils import upload_file_to_s3, delete_file_from_s3, test_s3_connection
 auth_bp = Blueprint('auth', __name__)
+from urllib.parse import urlencode
+import json as _json
+import secrets
+import requests as _requests
+from config import Config
 
 # Configuration for file uploads
 MAX_IMAGES = 3
@@ -30,10 +34,18 @@ def register():
     email = data.get('email')
     password = data.get('password')
 
-    # Block if verified user exists
-    existing_user = User.query.filter((User.username == username) | (User.email == email)).first()
-    if existing_user:
-        return jsonify({'error': 'Username or email already exists'}), 400
+    # Basic validation
+    if not username or not email or not password:
+        return jsonify({'error': 'Username, email and password are required'}), 400
+
+    # Enforce uniqueness with specific errors
+    existing_username = User.query.filter_by(username=username).first()
+    if existing_username:
+        return jsonify({'error': 'Username already in use', 'code': 'username_taken'}), 409
+
+    existing_email = User.query.filter_by(email=email).first()
+    if existing_email:
+        return jsonify({'error': 'Email already in use', 'code': 'email_taken'}), 409
 
     # Remove existing pending registration for same email
     existing_pending = PendingUser.query.filter_by(email=email).first()
@@ -84,13 +96,187 @@ def login():
 
 @auth_bp.route('/google-login', methods=['POST'])
 def google_login():
+    print("🔐 Backend - Google login endpoint called")
+    print("🔐 Backend - Request method:", request.method)
+    print("🔐 Backend - Request headers:", dict(request.headers))
+    
     data = request.json
-    id_token_str = data.get('id_token')
+    print("🔐 Backend - Request data:", data)
+    
+    google_user_data = data.get('user')  # This will contain the user data from frontend
+    id_token = data.get('id_token')  # Google ID token for verification
 
-    if not id_token_str:
-        return jsonify({'error': 'Google ID token is required'}), 400
+    print("🔐 Backend - Google user data:", google_user_data)
+    print("🔐 Backend - Has ID token:", bool(id_token))
 
+    if not google_user_data:
+        print("❌ Backend - No Google user data provided")
+        return jsonify({'error': 'Google user data is required'}), 400
+    
     try:
+        google_id = google_user_data.get('id')
+        email = google_user_data.get('email')
+        name = google_user_data.get('name', f'user_{google_id}')
+        picture = google_user_data.get('picture')
+
+        print("🔐 Backend - Extracted data:", {
+            'google_id': google_id,
+            'email': email,
+            'name': name,
+            'has_picture': bool(picture)
+        })
+
+        if not email:
+            print("❌ Backend - No email provided")
+            return jsonify({'error': 'Email is required from Google'}), 400
+
+        if id_token:
+            print("🔐 Backend - ID token received, would verify with Google here")
+            # You can add Google token verification here later
+
+        # Check if user exists by email or google_id
+        user = User.query.filter(
+            (User.email == email) | (User.google_id == google_id)
+        ).first()
+
+        print("🔐 Backend - User lookup result:", "Found" if user else "Not found")
+
+        if not user:
+            # Create new user
+            print("🔐 Backend - Creating new user")
+            user = User(
+                username=name,
+                email=email,
+                google_id=google_id,
+                profile_picture=picture,
+                auth_provider='google',
+                password=None  # No password for Google users
+            )
+            db.session.add(user)
+            db.session.commit()
+            print("🔐 Backend - New user created with ID:", user.id)
+        else:
+            # Update existing user's Google info if they logged in with Google before
+            print("🔐 Backend - Updating existing user")
+            if not user.google_id:
+                user.google_id = google_id
+                user.auth_provider = 'google'
+            if picture and not user.profile_picture:
+                user.profile_picture = picture
+            db.session.commit()
+            print("🔐 Backend - User updated")
+
+        # Create JWT access token
+        access_token = create_access_token(identity=str(user.id))
+        print("🔐 Backend - JWT token created for user ID:", user.id)
+
+        response_data = {
+            'message': 'Google login successful',
+            'token': access_token,
+            'user_id': user.id,
+            'email': user.email,
+            'username': user.username,
+            'profile_picture': user.profile_picture,
+            'auth_provider': user.auth_provider
+        }
+        
+        print("🔐 Backend - Sending success response:", response_data)
+        return jsonify(response_data), 200
+
+    except Exception as e:
+        print(f"❌ Backend - Google login error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': 'Google login failed'}), 500
+
+    except ValueError as e:
+        print(f"❌ Backend - ValueError: {str(e)}")
+        return jsonify({'error': f'Invalid token: {str(e)}'}), 400
+
+
+@auth_bp.route('/oauth/google/start', methods=['GET'])
+def oauth_google_start():
+    """Start Google OAuth and redirect the user to Google's consent page.
+
+    Optional query param: app_redirect (deep link, e.g., agenagn://oauth).
+    The value must begin with an entry in Config.APP_REDIRECT_ALLOWLIST.
+    """
+    try:
+        app_redirect = request.args.get('app_redirect') or 'agenagn://oauth'
+
+        allowlist = set(Config.APP_REDIRECT_ALLOWLIST or [])
+        if not any(app_redirect.startswith(allowed) for allowed in allowlist):
+            return jsonify({'error': 'Invalid app redirect URI'}), 400
+
+        if not Config.GOOGLE_CLIENT_ID or not Config.GOOGLE_REDIRECT_URI:
+            return jsonify({'error': 'Google OAuth not configured on server'}), 500
+
+        state_obj = {
+            'app_redirect': app_redirect,
+            'nonce': secrets.token_urlsafe(16)
+        }
+        state = _json.dumps(state_obj, separators=(',', ':'))
+
+        params = {
+            'client_id': Config.GOOGLE_CLIENT_ID,
+            'redirect_uri': Config.GOOGLE_REDIRECT_URI,
+            'response_type': 'code',
+            'scope': 'openid email profile',
+            'access_type': 'offline',
+            'include_granted_scopes': 'true',
+            'state': state,
+            'prompt': 'select_account'
+        }
+        auth_url = 'https://accounts.google.com/o/oauth2/v2/auth?' + urlencode(params)
+        return "", 302, {'Location': auth_url}
+    except Exception as e:
+        return jsonify({'error': f'Failed to start Google OAuth: {str(e)}'}), 500
+
+
+@auth_bp.route('/oauth/google/callback', methods=['GET'])
+def oauth_google_callback():
+    """Handle Google OAuth callback: exchange code, upsert user, deep link back with JWT."""
+    try:
+        code = request.args.get('code')
+        state_raw = request.args.get('state')
+        error = request.args.get('error')
+        if error:
+            return jsonify({'error': f'Google OAuth error: {error}'}), 400
+        if not code:
+            return jsonify({'error': 'Authorization code missing'}), 400
+
+        try:
+            state = _json.loads(state_raw) if state_raw else {}
+        except Exception:
+            state = {}
+
+        app_redirect = state.get('app_redirect') or 'agenagn://oauth'
+        allowlist = set(Config.APP_REDIRECT_ALLOWLIST or [])
+        if not any(app_redirect.startswith(allowed) for allowed in allowlist):
+            return jsonify({'error': 'Invalid app redirect URI'}), 400
+
+        if not Config.GOOGLE_CLIENT_ID or not Config.GOOGLE_CLIENT_SECRET or not Config.GOOGLE_REDIRECT_URI:
+            return jsonify({'error': 'Google OAuth not configured on server'}), 500
+
+        token_resp = _requests.post(
+            'https://oauth2.googleapis.com/token',
+            data={
+                'code': code,
+                'client_id': Config.GOOGLE_CLIENT_ID,
+                'client_secret': Config.GOOGLE_CLIENT_SECRET,
+                'redirect_uri': Config.GOOGLE_REDIRECT_URI,
+                'grant_type': 'authorization_code'
+            },
+            timeout=15
+        )
+        if token_resp.status_code != 200:
+            return jsonify({'error': 'Failed to exchange code for tokens', 'details': token_resp.text}), 400
+
+        token_data = token_resp.json()
+        id_token_str = token_data.get('id_token')
+        if not id_token_str:
+            return jsonify({'error': 'No ID token returned from Google'}), 400
+
         from google.oauth2 import id_token as google_id_token
         from google.auth.transport import requests as google_requests
 
@@ -103,14 +289,14 @@ def google_login():
         if verified.get('iss') not in ['accounts.google.com', 'https://accounts.google.com']:
             return jsonify({'error': 'Invalid token issuer'}), 401
 
-        if not verified.get('email'):
+        email = verified.get('email')
+        if not email:
             return jsonify({'error': 'Email is required from Google'}), 400
 
         if not verified.get('email_verified', False):
             return jsonify({'error': 'Google email not verified'}), 400
 
         google_id = verified['sub']
-        email = verified['email']
         name = verified.get('name', f'user_{google_id}')
         picture = verified.get('picture')
 
@@ -145,21 +331,17 @@ def google_login():
 
         access_token = create_access_token(identity=str(user.id))
 
-        return jsonify({
-            'message': 'Google login successful',
+        qs = urlencode({
             'token': access_token,
             'user_id': user.id,
             'email': user.email,
             'username': user.username,
-            'profile_picture': user.profile_picture,
-            'auth_provider': user.auth_provider
-        }), 200
-
-    except ValueError as e:
-        return jsonify({'error': f'Invalid Google token: {str(e)}'}), 401
+            'profile_picture': user.profile_picture or ''
+        })
+        redirect_url = f"{app_redirect}?{qs}"
+        return "", 302, {'Location': redirect_url}
     except Exception as e:
-        return jsonify({'error': f'Google login failed: {str(e)}'}), 500
-
+        return jsonify({'error': f'Google OAuth callback failed: {str(e)}'}), 500
 
 @auth_bp.route('/refresh-token', methods=['POST'])
 @jwt_required()
@@ -1153,12 +1335,19 @@ def verify_email():
         db.session.commit()  # persist attempt count
         return jsonify({'error': 'Invalid verification code'}), 400
 
+    # Before creating the verified user, ensure final uniqueness
+    if User.query.filter_by(username=pending.username).first():
+        return jsonify({'error': 'Username already in use', 'code': 'username_taken'}), 409
+    if User.query.filter_by(email=pending.email).first():
+        return jsonify({'error': 'Email already in use', 'code': 'email_taken'}), 409
+
     # Create verified user
     new_user = User(
         username=pending.username,
         email=pending.email,
         password=pending.password_hash,
         auth_provider='email',
+        is_email_verified=True
     )
     db.session.add(new_user)
     db.session.delete(pending)
