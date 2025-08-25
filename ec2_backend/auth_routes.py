@@ -1059,28 +1059,47 @@ def delete_account():
 
     try:
         data = request.json
-        # No need to validate user_email since we get user from JWT token
 
-        # Find user by email
-        # user = User.query.filter_by(email=user_email).first()
-        # if not user:
-        #     return jsonify({'error': 'User not found'}), 404
-
-        # Delete all posts and associated images from S3
+        # 1) Delete all posts by the user and their images (S3 best-effort)
         posts = Post.query.filter_by(user_id=user.id).all()
+        post_ids = [p.id for p in posts]
+
+        # Remove dependent rows that reference these posts (other users' saves/likes/reports)
+        if post_ids:
+            SavedPost.query.filter(SavedPost.post_id.in_(post_ids)).delete(synchronize_session=False)
+            PostLike.query.filter(PostLike.post_id.in_(post_ids)).delete(synchronize_session=False)
+            PostReport.query.filter(PostReport.post_id.in_(post_ids)).delete(synchronize_session=False)
+
         for post in posts:
             for image in post.images:
                 if image.s3_key:
-                    # Delete from S3
                     delete_result = delete_file_from_s3(image.s3_key)
                     if not delete_result['success']:
                         print(f"Warning: Failed to delete S3 file {image.s3_key}: {delete_result['error']}")
             db.session.delete(post)
 
-        # Delete saved posts
+        # 2) Delete messages and notifications for any chat room involving the user
+        chat_rooms = ChatRoom.query.filter(
+            (ChatRoom.user1_id == user.id) | (ChatRoom.user2_id == user.id)
+        ).all()
+        for chat_room in chat_rooms:
+            Message.query.filter_by(chat_room_id=chat_room.id).delete()
+            Notification.query.filter_by(chat_room_id=chat_room.id).delete()
+            db.session.delete(chat_room)
+
+        # 3) Delete notifications where user is sender or recipient (not tied to chat)
+        Notification.query.filter(
+            (Notification.recipient_id == user.id) | (Notification.sender_id == user.id)
+        ).delete()
+
+        # 4) Delete likes and reports made by the user
+        PostLike.query.filter_by(user_id=user.id).delete()
+        PostReport.query.filter_by(reporter_id=user.id).delete()
+
+        # 5) Delete saved posts
         SavedPost.query.filter_by(user_id=user.id).delete()
 
-        # Delete the user account
+        # 6) Finally, delete the user account
         db.session.delete(user)
         db.session.commit()
 
