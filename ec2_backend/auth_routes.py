@@ -852,6 +852,19 @@ def delete_post():
         if not post:
             return jsonify({'error': 'Post not found or does not belong to the user'}), 404
 
+        # Remove dependent rows first to avoid FK constraint errors
+        # 1) Likes, Saved, Reports
+        PostLike.query.filter_by(post_id=post.id).delete(synchronize_session=False)
+        SavedPost.query.filter_by(post_id=post.id).delete(synchronize_session=False)
+        PostReport.query.filter_by(post_id=post.id).delete(synchronize_session=False)
+
+        # 2) Chat rooms, their messages and notifications
+        chat_rooms = ChatRoom.query.filter_by(post_id=post.id).all()
+        for chat_room in chat_rooms:
+            Message.query.filter_by(chat_room_id=chat_room.id).delete(synchronize_session=False)
+            Notification.query.filter_by(chat_room_id=chat_room.id).delete(synchronize_session=False)
+            db.session.delete(chat_room)
+
         # Delete associated images from S3
         for image in post.images:
             if image.s3_key:
