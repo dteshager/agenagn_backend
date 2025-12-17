@@ -90,7 +90,7 @@ def login():
 
         return jsonify({'message': 'Login successful',
                         'token': access_token,
-                        'user_id': user.id, 'email': user.email, 'username': user.username}), 200
+                        'user_id': user.id, 'email': user.email, 'username': user.username, 'is_admin': user.is_admin}), 200
 
     return jsonify({'error': 'Invalid credentials'}), 401
 
@@ -177,7 +177,8 @@ def google_login():
             'email': user.email,
             'username': user.username,
             'profile_picture': user.profile_picture,
-            'auth_provider': user.auth_provider
+            'auth_provider': user.auth_provider,
+            'is_admin': user.is_admin if hasattr(user, 'is_admin') else False
         }
         
         print("🔐 Backend - Sending success response:", response_data)
@@ -362,7 +363,8 @@ def refresh_token():
             'token': new_access_token,
             'user_id': user.id,
             'email': user.email,
-            'username': user.username
+            'username': user.username,
+            'is_admin': user.is_admin if hasattr(user, 'is_admin') else False
         }), 200
         
     except Exception as e:
@@ -880,6 +882,108 @@ def delete_post():
 
         return jsonify({'message': 'Post deleted successfully'}), 200
 
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': f'Failed to delete post: {str(e)}'}), 500
+
+# Admin endpoints
+@auth_bp.route('/admin/login', methods=['POST'])
+def admin_login():
+    """Admin login endpoint - requires admin credentials"""
+    data = request.json
+    email = data.get('email')
+    password = data.get('password')
+
+    if not email or not password:
+        return jsonify({'error': 'Email and password are required'}), 400
+
+    user = User.query.filter_by(email=email).first()
+    if not user:
+        return jsonify({'error': 'Invalid credentials'}), 401
+
+    # Check password
+    if not user.password or not check_password_hash(user.password, password):
+        return jsonify({'error': 'Invalid credentials'}), 401
+
+    # Check if user is admin
+    if not user.is_admin:
+        return jsonify({'error': 'Admin privileges required'}), 403
+
+    # Create JWT access token
+    access_token = create_access_token(identity=str(user.id))
+
+    return jsonify({
+        'message': 'Admin login successful',
+        'token': access_token,
+        'user_id': user.id,
+        'email': user.email,
+        'username': user.username,
+        'is_admin': True
+    }), 200
+
+@auth_bp.route('/admin/check', methods=['GET'])
+@jwt_required()
+def admin_check():
+    """Check if current user has admin privileges"""
+    current_user_id = get_jwt_identity()
+    user = User.query.get(int(current_user_id))
+    
+    if not user:
+        return jsonify({'error': 'User not found'}), 400
+    
+    return jsonify({
+        'is_admin': user.is_admin if hasattr(user, 'is_admin') else False
+    }), 200
+
+@auth_bp.route('/admin/posts/<int:post_id>', methods=['DELETE'])
+@jwt_required()
+def admin_delete_post(post_id):
+    """Admin endpoint to delete any post"""
+    # Get current user
+    current_user_id = get_jwt_identity()
+    user = User.query.get(int(current_user_id))
+    
+    if not user:
+        return jsonify({'error': 'User not found'}), 400
+    
+    # Check if user is admin
+    if not user.is_admin:
+        return jsonify({'error': 'Admin privileges required'}), 403
+    
+    try:
+        # Find the post
+        post = Post.query.get(post_id)
+        if not post:
+            return jsonify({'error': 'Post not found'}), 404
+        
+        # Remove dependent rows first to avoid FK constraint errors
+        # 1) Likes, Saved, Reports
+        PostLike.query.filter_by(post_id=post.id).delete(synchronize_session=False)
+        SavedPost.query.filter_by(post_id=post.id).delete(synchronize_session=False)
+        PostReport.query.filter_by(post_id=post.id).delete(synchronize_session=False)
+        
+        # 2) Chat rooms, their messages and notifications
+        chat_rooms = ChatRoom.query.filter_by(post_id=post.id).all()
+        for chat_room in chat_rooms:
+            Message.query.filter_by(chat_room_id=chat_room.id).delete(synchronize_session=False)
+            Notification.query.filter_by(chat_room_id=chat_room.id).delete(synchronize_session=False)
+            db.session.delete(chat_room)
+        
+        # Delete associated images from S3
+        for image in post.images:
+            if image.s3_key:
+                # Delete from S3
+                delete_result = delete_file_from_s3(image.s3_key)
+                if not delete_result['success']:
+                    print(f"Warning: Failed to delete S3 file {image.s3_key}: {delete_result['error']}")
+                    # Continue with post deletion even if S3 deletion fails
+        
+        # Delete the post
+        db.session.delete(post)
+        db.session.commit()
+        
+        return jsonify({'message': 'Post deleted successfully'}), 200
+        
     except Exception as e:
         db.session.rollback()
         return jsonify({'error': f'Failed to delete post: {str(e)}'}), 500
@@ -1620,3 +1724,132 @@ def get_report_status(post_id):
 
     except Exception as e:
         return jsonify({'error': f'Failed to get report status: {str(e)}'}), 500
+
+# Admin route to get all posts
+@auth_bp.route('/admin/posts', methods=['GET'])
+@jwt_required()
+def admin_get_all_posts():
+    # Get current user and check admin status
+    current_user_id = get_jwt_identity()
+    user = User.query.get(int(current_user_id))
+    
+    if not user or not user.is_admin:
+        return jsonify({'error': 'Admin access required'}), 403
+
+    try:
+        # Get query parameters for filtering
+        post_type = request.args.get('post_type', None)
+        page = request.args.get('page', 1, type=int)
+        per_page = request.args.get('per_page', 20, type=int)
+
+        # Build query
+        query = Post.query.order_by(Post.created_at.desc())
+        
+        if post_type:
+            query = query.filter_by(post_type=post_type)
+
+        # Paginate
+        pagination = query.paginate(page=page, per_page=per_page, error_out=False)
+        posts = pagination.items
+
+        # Format posts with user info and images
+        posts_data = []
+        for post in posts:
+            post_dict = {
+                'id': post.id,
+                'title': post.title,
+                'content': post.content,
+                'post_type': post.post_type,
+                'location': post.location,
+                'user_id': post.user_id,
+                'user_name': post.user.username,
+                'created_at': post.created_at.isoformat() if post.created_at else None,
+                'images': [{'url': img.image_url, 'id': img.id} for img in post.images],
+                'like_count': PostLike.query.filter_by(post_id=post.id).count(),
+                'report_count': PostReport.query.filter_by(post_id=post.id).count()
+            }
+            posts_data.append(post_dict)
+
+        return jsonify({
+            'posts': posts_data,
+            'total': pagination.total,
+            'page': page,
+            'per_page': per_page,
+            'pages': pagination.pages
+        }), 200
+
+    except Exception as e:
+        return jsonify({'error': f'Failed to fetch posts: {str(e)}'}), 500
+
+# Admin route to get all reported posts
+@auth_bp.route('/admin/reports', methods=['GET'])
+@jwt_required()
+def admin_get_reported_posts():
+    """Get all posts that have been reported, with report details"""
+    # Get current user and check admin status
+    current_user_id = get_jwt_identity()
+    user = User.query.get(int(current_user_id))
+    
+    if not user or not user.is_admin:
+        return jsonify({'error': 'Admin access required'}), 403
+
+    try:
+        # Get query parameters
+        status = request.args.get('status', 'pending')  # 'pending', 'reviewed', 'all'
+        
+        # Get all reports
+        query = PostReport.query.order_by(PostReport.created_at.desc())
+        
+        if status != 'all':
+            query = query.filter_by(status=status)
+        
+        reports = query.all()
+        
+        # Group reports by post_id and get post details
+        reported_posts = {}
+        for report in reports:
+            post_id = report.post_id
+            if post_id not in reported_posts:
+                post = report.post
+                # Get all reports for this post
+                all_reports_for_post = PostReport.query.filter_by(post_id=post_id).all()
+                
+                reported_posts[post_id] = {
+                    'id': post.id,
+                    'title': post.title,
+                    'content': post.content,
+                    'post_type': post.post_type,
+                    'location': post.location,
+                    'user_id': post.user_id,
+                    'user_name': post.user.username,
+                    'created_at': post.created_at.isoformat() if post.created_at else None,
+                    'images': [{'url': img.image_url, 'id': img.id} for img in post.images],
+                    'like_count': PostLike.query.filter_by(post_id=post.id).count(),
+                    'report_count': len(all_reports_for_post),
+                    'reports': []
+                }
+            
+            # Add this report's details
+            reported_posts[post_id]['reports'].append({
+                'id': report.id,
+                'reporter_id': report.reporter_id,
+                'reporter_username': report.reporter.username if report.reporter else 'Unknown',
+                'reason': report.reason,
+                'description': report.description,
+                'status': report.status,
+                'admin_notes': report.admin_notes,
+                'created_at': report.created_at.isoformat() if report.created_at else None,
+                'reviewed_at': report.reviewed_at.isoformat() if report.reviewed_at else None,
+            })
+        
+        # Convert to list and sort by most recent report
+        posts_list = list(reported_posts.values())
+        posts_list.sort(key=lambda x: max([r['created_at'] for r in x['reports']], default=''), reverse=True)
+        
+        return jsonify({
+            'posts': posts_list,
+            'total': len(posts_list)
+        }), 200
+
+    except Exception as e:
+        return jsonify({'error': f'Failed to fetch reported posts: {str(e)}'}), 500

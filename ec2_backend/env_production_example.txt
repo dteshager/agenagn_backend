@@ -1,0 +1,49 @@
+# Production Environment Configuration
+# Copy this file to .env and fill in your actual values
+
+# Flask Configuration
+FLASK_ENV=production
+
+# JWT Configuration - REQUIRED: Generate using: python -c "import secrets; print(secrets.token_urlsafe(32))"
+JWT_SECRET_KEY=CHANGE_THIS_TO_A_RANDOM_SECRET_KEY_32_CHARS_MINIMUM
+
+# CORS Configuration - Restrict to your domains only
+ALLOWED_ORIGINS=https://api.dteshager.com
+
+# Google OAuth Configuration (REQUIRED for Google Sign-In)
+GOOGLE_CLIENT_ID=your-google-client-id.apps.googleusercontent.com
+GOOGLE_CLIENT_SECRET=your-google-client-secret
+
+# Database Configuration
+DATABASE_URL=sqlite:///agenagn.db
+
+# Email Configuration (for user verification emails)
+EMAIL_ADDRESS=your-email@gmail.com
+EMAIL_PASS=your-gmail-app-password
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USERNAME=your-email@gmail.com
+SMTP_PASSWORD=your-gmail-app-password
+EMAIL_FROM=your-email@gmail.com
+
+# AWS S3 Configuration (for image uploads)
+AWS_ACCESS_KEY_ID=your-aws-access-key-id
+AWS_SECRET_ACCESS_KEY=your-aws-secret-access-key
+AWS_REGION=us-east-2
+AWS_S3_BUCKET=agenagn-uploads
+
+# Production Server Configuration
+SOCKETIO_ASYNC_MODE=eventlet
+
+# Security Headers
+ALLOWED_HOSTS=api.dteshager.com
+
+# Generate secrets using:
+# python -c "import secrets; print(secrets.token_urlsafe(32))"
+
+
+
+
+
+
+

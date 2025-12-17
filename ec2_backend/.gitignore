@@ -1,42 +1,53 @@
-# ---- Python ----
+# Python
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
+*.py[cod]
+*$py.class
 *.so
-*.csv
-
-# Virtual environments
+.Python
+env/
 venv/
-.env/
-.venv/
+ENV/
+.venv
 
-# Environment files
+# Environment variables - NEVER commit these!
 .env
-*.env
+.env.local
+.env.production
 
-# Logs
-*.log
-
-# Byte-compiled
-*.egg-info/
-dist/
-build/
-
-# ---- Flask / Config ----
-instance/
+# Database files
 *.db
+*.sqlite
 *.sqlite3
 
-# ---- OS files ----
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
 .DS_Store
 Thumbs.db
 
-# ---- AWS / EC2 ----
-# Don't commit private key files!
-*.pem
+# Logs
+*.log
+logs/
 
-# AWS CLI cache/config
-.aws/
+# Uploads (if stored locally)
+uploads/
+temp/
 
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Distribution
+dist/
+build/
+*.egg-info/
+
+# Admin credentials
+create_admin_user.py
 

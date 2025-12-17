@@ -18,6 +18,10 @@ class User(db.Model):
     is_email_verified = db.Column(db.Boolean, default=False)
     email_verification_code = db.Column(db.String(10), nullable=True)
     email_verification_expires_at = db.Column(db.DateTime, nullable=True)
+    # Admin field
+    is_admin = db.Column(db.Boolean, default=False, nullable=False)
+
+
    
 class Post(db.Model):
     id = db.Column(db.Integer, primary_key=True)
