@@ -48,6 +48,4 @@ dist/
 build/
 *.egg-info/
 
-# Admin credentials
-create_admin_user.py
 
